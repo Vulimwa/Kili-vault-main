@@ -83,7 +83,7 @@ export function PreDevMap({
     const overlayLayer = new GraphicsLayer({ title: 'Site pin & proximity' });
     overlayLayerRef.current = overlayLayer;
 
-    const map = new Map({ basemap: 'arcgis-topographic' });
+    const map = new Map({ basemap: 'topo' });
 
     const featureLayers: Partial<Record<SiteInfraLayerId, FeatureLayer>> = {};
     MAP_LAYERS.filter((config) =>
@@ -94,7 +94,7 @@ export function PreDevMap({
       const outFields = ["OBJECTID", ...(id === "roads" ? ["fclass"] : [])];
       const layer = createMapFeatureLayer(
         config,
-        layerVisibility[id] ?? DEFAULT_LAYER_VISIBILITY[id],
+        false,
         outFields,
       );
       featureLayers[id] = layer;
@@ -154,11 +154,12 @@ export function PreDevMap({
   }, []);
 
   useEffect(() => {
+    if (!ready) return;
     SITE_INFRA_LAYER_IDS.forEach((id) => {
       const layer = featureLayersRef.current[id];
       if (layer) layer.visible = layerVisibility[id];
     });
-  }, [layerVisibility]);
+  }, [layerVisibility, ready]);
 
   useEffect(() => {
     const view = viewRef.current;

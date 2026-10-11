@@ -138,7 +138,7 @@ export function DevelopmentSimulatorMap({
   useEffect(() => {
     if (!containerRef.current) return;
     let destroyed = false;
-    const map = new Map({ basemap: "arcgis-topographic" });
+    const map = new Map({ basemap: "topo" });
     const layers: Record<string, FeatureLayer> = {};
     CONTEXT_LAYER_IDS.forEach((id) => {
       const config = MAP_LAYERS.find((item) => item.id === id);

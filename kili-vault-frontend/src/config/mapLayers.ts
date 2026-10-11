@@ -24,6 +24,9 @@ export interface MapLayerConfig {
   displayFields?: string[];
   searchFields?: string[];
   planningFields?: string[];
+  source?: string;
+  limitations?: string;
+  planningUse?: "decision-support" | "indicative" | "orientation";
 }
 
 /** Layers shown on 3D site / pre-dev maps for infrastructure context */

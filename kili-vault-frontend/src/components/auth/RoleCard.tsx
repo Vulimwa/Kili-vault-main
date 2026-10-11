@@ -20,7 +20,7 @@ export function RoleCard({
   imageAlt,
 }: RoleCardProps) {
   return (
-    <calcite-card className="login-portal-card h-full">
+    <calcite-card className="login-portal-card h-full min-w-0">
       <img
         slot="thumbnail"
         src={imageSrc}
@@ -28,13 +28,13 @@ export function RoleCard({
         loading="lazy"
         className="h-10 w-full object-cover sm:h-14 lg:h-20"
       />
-      <span slot="title" className="flex items-center gap-2">
+      <span slot="title" className="flex min-w-0 items-center gap-2 break-words">
         <calcite-icon icon={icon} scale="s" />
         {label}
       </span>
-      <span slot="subtitle">{subtitle}</span>
+      <span slot="subtitle" className="break-words">{subtitle}</span>
 
-      <p className="line-clamp-2 text-xs leading-relaxed text-[var(--calcite-color-text-2)] sm:text-sm">
+      <p className="line-clamp-3 break-words text-xs leading-relaxed text-[var(--calcite-color-text-2)] sm:text-sm">
         {description}
       </p>
 

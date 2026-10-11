@@ -279,7 +279,7 @@ export async function previewPreDevelopment(
   input: PreDevelopmentInput,
 ): Promise<{ success: boolean; data: PreDevelopmentAssessment }> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20000);
+  const timeout = setTimeout(() => controller.abort(), 10000);
   try {
     return await fetchJson("/api/v1/cases/pre-development/preview", {
       method: "POST",

@@ -17,6 +17,10 @@ import BasemapGallery from "@arcgis/core/widgets/BasemapGallery";
 import Expand from "@arcgis/core/widgets/Expand";
 import Home from "@arcgis/core/widgets/Home";
 import LayerList from "@arcgis/core/widgets/LayerList";
+import Legend from "@arcgis/core/widgets/Legend";
+import Bookmarks from "@arcgis/core/widgets/Bookmarks";
+import ScaleBar from "@arcgis/core/widgets/ScaleBar";
+import Compass from "@arcgis/core/widgets/Compass";
 import Attribution from "@arcgis/core/widgets/Attribution";
 import {
   KILIMANI_WARD_EXTENT,
@@ -62,6 +66,7 @@ export interface PlannerFeatureSelection {
     roadDistanceM: number | null;
     riverDistanceM: number | null;
     riverBufferOverlap: boolean | null;
+    status?: "loading" | "ready" | "error";
   };
 }
 
@@ -214,6 +219,7 @@ async function buildFeatureContext(
   layerId: string,
   geometry: __esri.Geometry,
   layers: Record<string, FeatureLayer>,
+  signal?: AbortSignal,
 ): Promise<PlannerFeatureSelection["context"]> {
   const searchGeometry = geometryEngine.geodesicBuffer(
     geometry,
@@ -224,6 +230,7 @@ async function buildFeatureContext(
     layer: FeatureLayer | undefined,
     target: __esri.Geometry,
     returnGeometry = true,
+    outFields = ["OBJECTID"],
   ) => {
     if (!layer) return [] as __esri.Graphic[];
     try {
@@ -232,7 +239,8 @@ async function buildFeatureContext(
         geometry: target,
         spatialRelationship: "intersects",
         returnGeometry,
-        outFields: ["*"],
+        outFields,
+        signal,
       });
       return result.features as __esri.Graphic[];
     } catch {
@@ -240,14 +248,23 @@ async function buildFeatureContext(
     }
   };
   const [buildings, roads, rivers, buffers, parcels] = await Promise.all([
+    layerId === "parcels-landuse"
+      ? query(
+          layers["buildings-parcels"] ?? layers.buildings,
+          geometry,
+          true,
+          ["OBJECTID", "Shape__Area"],
+        )
+      : Promise.resolve([] as __esri.Graphic[]),
+    query(layers.roads, searchGeometry as __esri.Geometry, true, ["OBJECTID", "name", "ref", "fclass"]),
+    query(layers.rivers, searchGeometry as __esri.Geometry, true, ["OBJECTID", "name", "width", "fclass"]),
+    query(layers["river-buffer"], geometry, false, ["OBJECTID"]),
     query(
-      layers["buildings-parcels"] ?? layers.buildings,
-      layerId === "parcels-landuse" ? geometry : searchGeometry as __esri.Geometry,
+      layers["parcels-landuse"],
+      geometry,
+      true,
+      ["OBJECTID", "parcel_num", "lr_number", "LANDUSE", "stated_are"],
     ),
-    query(layers.roads, searchGeometry as __esri.Geometry),
-    query(layers.rivers, searchGeometry as __esri.Geometry),
-    query(layers["river-buffer"], geometry, false),
-    query(layers["parcels-landuse"], geometry),
   ]);
   const nearest = (features: __esri.Graphic[]) => {
     const distances = features
@@ -284,6 +301,7 @@ async function buildFeatureContext(
     roadDistanceM: nearest(roads),
     riverDistanceM: nearest(rivers),
     riverBufferOverlap: buffers.length > 0,
+    status: "ready",
   };
 }
 
@@ -321,6 +339,10 @@ export function KilimaniMap({
   const casesLayerRef = useRef<GeoJSONLayer | null>(null);
   const detectionsLayerRef = useRef<GeoJSONLayer | null>(null);
   const highlightHandleRef = useRef<__esri.Handle | null>(null);
+  const contextAbortRef = useRef<AbortController | null>(null);
+  const coordinateReadoutRef = useRef<HTMLDivElement | null>(null);
+  const [exportingMap, setExportingMap] = useState(false);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
   const casesRef = useRef(cases);
   casesRef.current = cases;
   const onCaseSelectRef = useRef(onCaseSelect);
@@ -363,7 +385,7 @@ export function KilimaniMap({
     let destroyed = false;
     const featureLayers: Record<string, FeatureLayer> = {};
 
-    const map = new Map({ basemap: "arcgis-topographic" });
+    const map = new Map({ basemap: "topo" });
 
     mapLayers.forEach((config) => {
       const layer = createMapFeatureLayer(
@@ -452,8 +474,101 @@ export function KilimaniMap({
       expandTooltip: "Layers",
       collapseTooltip: "Close layers",
     });
+    const legend = new Legend({ view });
+    const legendExpand = new Expand({
+      view,
+      content: legend,
+      group: "top-right",
+      expandIcon: "legend",
+      expandTooltip: "Legend",
+      collapseTooltip: "Close legend",
+    });
+    const bookmarks = new Bookmarks({
+      view,
+      bookmarks: [{ name: "Kilimani Ward overview", extent: KILIMANI_WARD_EXTENT }],
+    });
+    const bookmarksExpand = new Expand({
+      view,
+      content: bookmarks,
+      group: "top-right",
+      expandIcon: "bookmark",
+      expandTooltip: "Planning bookmarks",
+      collapseTooltip: "Close planning bookmarks",
+    });
+    const metadataNode = document.createElement("div");
+    metadataNode.className = "kili-map-metadata-panel";
+    metadataNode.innerHTML = `
+      <strong>Layer sources & limitations</strong>
+      <p>Spatial results are indicative planning context, not legal determinations.</p>
+      ${mapLayers
+        .map(
+          (config) =>
+            `<details><summary>${config.title}</summary><p>${config.description}</p><a href="${config.url}" target="_blank" rel="noreferrer">Open FeatureServer source</a></details>`,
+        )
+        .join("")}
+    `;
+    const metadataExpand = new Expand({
+      view,
+      content: metadataNode,
+      group: "top-right",
+      expandIcon: "information",
+      expandTooltip: "Layer sources and limitations",
+      collapseTooltip: "Close layer sources",
+    });
+    const scaleBar = new ScaleBar({ view, unit: "metric" });
+    const compass = new Compass({ view });
     view.ui.add(basemapExpand, "top-right", 0);
     view.ui.add(layerExpand, "top-right", 1);
+    view.ui.add(legendExpand, "top-right", 2);
+    view.ui.add(bookmarksExpand, "top-right", 3);
+    view.ui.add(metadataExpand, "top-right", 4);
+    view.ui.add(scaleBar, "bottom-left", 1);
+    view.ui.add(compass, "top-left");
+
+    const coordinateReadout = document.createElement("div");
+    coordinateReadout.className = "kili-map-coordinate-readout";
+    coordinateReadout.setAttribute("role", "status");
+    coordinateReadout.textContent = "Coordinates unavailable";
+    view.ui.add(coordinateReadout, "bottom-right");
+    coordinateReadoutRef.current = coordinateReadout;
+    const pointerHandle = view.on("pointer-move", (event: {
+      mapPoint?: { longitude?: number; latitude?: number };
+    }) => {
+      const point = event.mapPoint;
+      if (!point) return;
+      const longitude = Number(point.longitude);
+      const latitude = Number(point.latitude);
+      if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+        coordinateReadout.textContent = `${latitude.toFixed(5)}, ${longitude.toFixed(5)} WGS84`;
+      }
+    });
+
+    const addExtentBookmark = async (
+      name: string,
+      layerId: string,
+      where?: string,
+    ) => {
+      const layer = featureLayers[layerId];
+      if (!layer || destroyed) return;
+      try {
+        const result = await layer.queryExtent({
+          where: where ?? "1=1",
+          signal: AbortSignal.timeout(8000),
+        });
+        if (destroyed || !result.extent) return;
+        bookmarks.bookmarks.add({ name, extent: result.extent });
+      } catch {
+        // A bookmark remains unavailable when its source service cannot respond.
+      }
+    };
+    void Promise.all([
+      addExtentBookmark("Major roads", "roads", "fclass IN ('primary','secondary','trunk','motorway')"),
+      addExtentBookmark("High-density residential", "landuse", "LANDUSE LIKE '%High%'"),
+      addExtentBookmark("Institutional / Public Purpose", "landuse", "LANDUSE LIKE '%Institution%' OR LANDUSE LIKE '%Public Purpose%'"),
+      addExtentBookmark("Open Space / Recreation", "landuse", "LANDUSE LIKE '%Open%' OR LANDUSE LIKE '%Recreat%'"),
+      addExtentBookmark("KV11 power corridor", "power-lines"),
+      addExtentBookmark("KV66 power corridor", "power-lines-66kv"),
+    ]);
 
     const plannerToolsNode = enablePlannerTools
       ? document.createElement("div")
@@ -481,11 +596,21 @@ export function KilimaniMap({
       setPlannerToolsControl(plannerToolsNode);
     }
 
+    const mapReadyTimeout = window.setTimeout(() => {
+      if (!destroyed) {
+        setMapStatus("error");
+        setMapError(
+          "ArcGIS map services did not respond in time. Retry when network access is available.",
+        );
+      }
+    }, 15000);
     view
       .when(() => {
+        window.clearTimeout(mapReadyTimeout);
         if (!destroyed) setMapStatus("ready");
       })
       .catch((err: Error) => {
+        window.clearTimeout(mapReadyTimeout);
         if (!destroyed) {
           setMapStatus("error");
           setMapError(err.message || "Failed to initialize map");
@@ -648,6 +773,18 @@ export function KilimaniMap({
             layerTitle: config?.title ?? layerId,
             geometry: featureHit.graphic.geometry,
             attributes,
+            context: {
+              parcelAreaM2: null,
+              parcelReference: null,
+              parcelLandUse: null,
+              intersectingParcelCount: null,
+              buildingCount: null,
+              buildingFootprintM2: null,
+              roadDistanceM: null,
+              riverDistanceM: null,
+              riverBufferOverlap: null,
+              status: "loading",
+            },
           };
           setSelection(null);
           setPlannerFeature(selected);
@@ -658,17 +795,37 @@ export function KilimaniMap({
               zoom: kind === "boundary" ? 15 : 18,
             })
             .catch(() => undefined);
+          contextAbortRef.current?.abort();
+          const contextController = new AbortController();
+          contextAbortRef.current = contextController;
           let context: PlannerFeatureSelection["context"];
           try {
             context = await buildFeatureContext(
               layerId,
               featureHit.graphic.geometry,
               featureLayers,
+              contextController.signal,
             );
           } catch {
-            context = undefined;
+            context = {
+              parcelAreaM2: null,
+              parcelReference: null,
+              parcelLandUse: null,
+              intersectingParcelCount: null,
+              buildingCount: null,
+              buildingFootprintM2: null,
+              roadDistanceM: null,
+              riverDistanceM: null,
+              riverBufferOverlap: null,
+              status: "error",
+            };
           }
-          if (context && !destroyed && sequence === clickSequence) {
+          if (
+            context &&
+            !destroyed &&
+            sequence === clickSequence &&
+            !contextController.signal.aborted
+          ) {
             const enrichedSelection = { ...selected, context };
             setPlannerFeature(enrichedSelection);
             onFeatureSelectRef.current?.(enrichedSelection);
@@ -693,6 +850,20 @@ export function KilimaniMap({
       basemapGallery.destroy();
       layerExpand.destroy();
       layerList.destroy();
+      legendExpand.destroy();
+      legend.destroy();
+      bookmarksExpand.destroy();
+      bookmarks.destroy();
+      metadataExpand.destroy();
+      metadataNode.remove();
+      scaleBar.destroy();
+      compass.destroy();
+      pointerHandle.remove();
+      coordinateReadout.remove();
+      coordinateReadoutRef.current = null;
+      window.clearTimeout(mapReadyTimeout);
+      contextAbortRef.current?.abort();
+      contextAbortRef.current = null;
       plannerToolsExpandHandle?.remove();
       plannerToolsExpand?.destroy();
       plannerToolsNode?.remove();
@@ -1266,6 +1437,141 @@ export function KilimaniMap({
     onFeatureSelectRef.current?.(null);
   };
 
+  const exportEvidenceMap = async () => {
+    const view = viewRef.current;
+    if (!view || exportingMap) return;
+    setExportingMap(true);
+    setExportMessage(null);
+    try {
+      const screenshot = await Promise.race([
+        view.takeScreenshot({ format: "png", quality: 95 }),
+        new Promise<never>((_, reject) =>
+          window.setTimeout(() => reject(new Error("Map export timed out")), 10000),
+        ),
+      ]);
+      const image = new Image();
+      image.src = screenshot.dataUrl;
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error("Map image could not be prepared"));
+      });
+      const canvas = document.createElement("canvas");
+      const width = 1600;
+      const height = 1000;
+      const headerHeight = 104;
+      const footerHeight = 52;
+      const sidebarWidth = 360;
+      const mapWidth = width - sidebarWidth;
+      const mapHeight = height - headerHeight - footerHeight;
+      const scale = Math.min(mapWidth / image.width, mapHeight / image.height);
+      const mapDrawWidth = image.width * scale;
+      const mapDrawHeight = image.height * scale;
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Map export canvas unavailable");
+      context.fillStyle = "#f7f8f6";
+      context.fillRect(0, 0, width, height);
+      context.fillStyle = "#1f2a24";
+      context.fillRect(0, 0, width, headerHeight);
+      context.fillStyle = "#2d5016";
+      context.fillRect(28, 22, 54, 54);
+      context.fillStyle = "#ffffff";
+      context.font = "bold 29px Arial";
+      context.fillText("K", 45, 60);
+      context.fillStyle = "#ffffff";
+      context.font = "bold 25px Arial";
+      context.fillText("KILI-VAULT", 101, 48);
+      context.font = "14px Arial";
+      context.fillStyle = "#dce5dc";
+      context.fillText("Kilimani Ward planning evidence map", 103, 72);
+      context.fillStyle = "#ffffff";
+      context.font = "bold 18px Arial";
+      context.fillText("SPATIAL EVIDENCE MAP", 1190, 42);
+      context.font = "12px Arial";
+      context.fillStyle = "#dce5dc";
+      context.fillText(
+        new Date().toLocaleString(),
+        1190,
+        66,
+      );
+
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, headerHeight, mapWidth, mapHeight);
+      context.drawImage(
+        image,
+        (mapWidth - mapDrawWidth) / 2,
+        headerHeight + (mapHeight - mapDrawHeight) / 2,
+        mapDrawWidth,
+        mapDrawHeight,
+      );
+      context.strokeStyle = "#c9d1ca";
+      context.lineWidth = 1;
+      context.strokeRect(0.5, headerHeight + 0.5, mapWidth - 1, mapHeight - 1);
+
+      context.fillStyle = "#ffffff";
+      context.fillRect(mapWidth, headerHeight, sidebarWidth, mapHeight);
+      context.fillStyle = "#1f2a24";
+      context.font = "bold 17px Arial";
+      context.fillText("MAP INFORMATION", mapWidth + 28, headerHeight + 38);
+      context.fillStyle = "#536158";
+      context.font = "12px Arial";
+      context.fillText("Visible planning layers", mapWidth + 28, headerHeight + 62);
+      let legendY = headerHeight + 92;
+      mapLayers
+        .filter((config) => layerVisibility[config.id] ?? config.defaultVisible)
+        .slice(0, 12)
+        .forEach((config) => {
+          context.fillStyle = "#2d5016";
+          context.fillRect(mapWidth + 28, legendY - 10, 12, 12);
+          context.fillStyle = "#2c382f";
+          context.font = "12px Arial";
+          context.fillText(config.title, mapWidth + 50, legendY);
+          legendY += 27;
+        });
+
+      const northX = mapWidth - 54;
+      const northY = headerHeight + 34;
+      context.fillStyle = "#1f2a24";
+      context.font = "bold 14px Arial";
+      context.fillText("N", northX - 5, northY);
+      context.beginPath();
+      context.moveTo(northX, northY + 8);
+      context.lineTo(northX - 9, northY + 30);
+      context.lineTo(northX, northY + 26);
+      context.lineTo(northX + 9, northY + 30);
+      context.closePath();
+      context.fill();
+
+      context.fillStyle = "#e8ede8";
+      context.fillRect(0, height - footerHeight, width, footerHeight);
+      context.fillStyle = "#536158";
+      context.font = "11px Arial";
+      context.fillText(
+        "Indicative spatial evidence only. Confirm source records and applicable planning or utility requirements.",
+        28,
+        height - 29,
+      );
+      context.textAlign = "right";
+      context.fillText(
+        "Sources: configured ArcGIS FeatureServer layers and Kili-Vault map context.",
+        width - 28,
+        height - 29,
+      );
+      context.textAlign = "left";
+      const link = document.createElement("a");
+      link.download = `kili-vault-evidence-map-${Date.now()}.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+    } catch (error) {
+      setExportMessage(
+        error instanceof Error ? error.message : "Map export failed",
+      );
+    } finally {
+      setExportingMap(false);
+    }
+  };
+
   if (mapStatus === "error") {
     return (
       <ErrorState
@@ -1539,6 +1845,29 @@ export function KilimaniMap({
               label="Search parcel or building"
             ></calcite-button>
           </form>
+          <calcite-button
+            appearance="outline"
+            scale="s"
+            icon-start="download"
+            label="Export evidence map"
+            className="pointer-events-auto absolute right-4 top-14 z-20 sm:top-4"
+            disabled={exportingMap}
+            onClick={() => void exportEvidenceMap()}
+          >
+            <span className="hidden sm:inline">
+              {exportingMap ? "Preparing map" : "Export map"}
+            </span>
+          </calcite-button>
+          {exportMessage && (
+            <calcite-notice
+              open
+              scale="s"
+              kind="danger"
+              className="pointer-events-auto absolute right-4 top-14 z-20 max-w-[min(24rem,calc(100%-2rem))]"
+            >
+              {exportMessage}
+            </calcite-notice>
+          )}
           {searchMessage && (
             <calcite-notice
               open

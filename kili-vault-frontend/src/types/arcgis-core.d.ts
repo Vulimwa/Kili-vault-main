@@ -146,6 +146,33 @@ declare module "@arcgis/core/widgets/Legend" {
   export default Legend;
 }
 
+declare module "@arcgis/core/widgets/Bookmarks" {
+  class Bookmarks {
+    [key: string]: any;
+    constructor(options?: any);
+    destroy(): void;
+  }
+  export default Bookmarks;
+}
+
+declare module "@arcgis/core/widgets/ScaleBar" {
+  class ScaleBar {
+    [key: string]: any;
+    constructor(options?: any);
+    destroy(): void;
+  }
+  export default ScaleBar;
+}
+
+declare module "@arcgis/core/widgets/Compass" {
+  class Compass {
+    [key: string]: any;
+    constructor(options?: any);
+    destroy(): void;
+  }
+  export default Compass;
+}
+
 declare module "@arcgis/core/widgets/Attribution" {
   class Attribution {
     [key: string]: any;

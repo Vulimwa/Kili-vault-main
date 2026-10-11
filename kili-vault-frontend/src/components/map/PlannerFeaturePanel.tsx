@@ -317,6 +317,18 @@ export function PlannerFeaturePanel({
 
       <section className="border-t border-sand px-4 py-3">
         <h3 className="text-sm font-semibold text-charcoal">Spatial context</h3>
+        {context?.status === "loading" && (
+          <calcite-notice open scale="s" kind="info" className="mt-3">
+            <span slot="title">Loading spatial context</span>
+            Checking mapped parcels, roads, rivers, and buffers.
+          </calcite-notice>
+        )}
+        {context?.status === "error" && (
+          <calcite-notice open scale="s" kind="warning" className="mt-3">
+            <span slot="title">Spatial context unavailable</span>
+            The feature is selected, but one or more context services did not respond.
+          </calcite-notice>
+        )}
         <dl className="mt-3 grid gap-3 text-sm">
           <div className="flex items-center justify-between gap-3">
             <dt className="text-charcoal-muted">Nearest road</dt>
