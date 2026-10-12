@@ -6,8 +6,11 @@ import GeoJSONLayer from "@arcgis/core/layers/GeoJSONLayer";
 import GraphicsLayer from "@arcgis/core/layers/GraphicsLayer";
 import Graphic from "@arcgis/core/Graphic";
 import Point from "@arcgis/core/geometry/Point";
+import * as webMercatorUtils from "@arcgis/core/geometry/support/webMercatorUtils";
+import * as geodesicBufferOperator from "@arcgis/core/geometry/operators/geodesicBufferOperator";
 import SimpleFillSymbol from "@arcgis/core/symbols/SimpleFillSymbol";
 import SimpleLineSymbol from "@arcgis/core/symbols/SimpleLineSymbol";
+import SimpleMarkerSymbol from "@arcgis/core/symbols/SimpleMarkerSymbol";
 import * as geometryEngine from "@arcgis/core/geometry/geometryEngine";
 import Measurement from "@arcgis/core/widgets/Measurement";
 import Sketch from "@arcgis/core/widgets/Sketch";
@@ -97,6 +100,12 @@ interface KilimaniMapProps {
   onCaseSelect?: (caseId: string) => void;
   caseLinkPrefix?: string;
   onFeatureSelect?: (selection: PlannerMapSelection | null) => void;
+  onMapClick?: (lat: number, lon: number) => void;
+  pinOnly?: boolean;
+  sitePin?: { lat: number; lon: number } | null;
+  showSiteProximity?: boolean;
+  sitePinPlaced?: boolean;
+  onSiteProximityChange?: (proximity: SiteProximity | null) => void;
   clearSelectionToken?: number;
   mapLayers?: MapLayerConfig[];
   enablePlannerTools?: boolean;
@@ -317,6 +326,12 @@ export function KilimaniMap({
   onCaseSelect,
   caseLinkPrefix = "/planner/cases",
   onFeatureSelect,
+  onMapClick,
+  pinOnly = false,
+  sitePin,
+  showSiteProximity = false,
+  sitePinPlaced = true,
+  onSiteProximityChange,
   clearSelectionToken = 0,
   mapLayers = MAP_LAYERS,
   enablePlannerTools = false,
@@ -331,6 +346,7 @@ export function KilimaniMap({
   const plannerToolsExpandRef = useRef<Expand | null>(null);
   const featureLayersRef = useRef<Record<string, FeatureLayer>>({});
   const proximityLayerRef = useRef<GraphicsLayer | null>(null);
+  const sitePinLayerRef = useRef<GraphicsLayer | null>(null);
   const analysisLayerRef = useRef<GraphicsLayer | null>(null);
   const sketchLayerRef = useRef<GraphicsLayer | null>(null);
   const measurementRef = useRef<Measurement | null>(null);
@@ -349,6 +365,10 @@ export function KilimaniMap({
   onCaseSelectRef.current = onCaseSelect;
   const onFeatureSelectRef = useRef(onFeatureSelect);
   onFeatureSelectRef.current = onFeatureSelect;
+  const onMapClickRef = useRef(onMapClick);
+  onMapClickRef.current = onMapClick;
+  const onSiteProximityChangeRef = useRef(onSiteProximityChange);
+  onSiteProximityChangeRef.current = onSiteProximityChange;
   const [mapStatus, setMapStatus] = useState<"loading" | "ready" | "error">(
     "loading",
   );
@@ -397,8 +417,11 @@ export function KilimaniMap({
     });
 
     const proximityLayer = new GraphicsLayer({ title: "Road proximity guide" });
+    const sitePinLayer = new GraphicsLayer({ title: "Selected plot location" });
     map.add(proximityLayer);
+    map.add(sitePinLayer);
     proximityLayerRef.current = proximityLayer;
+    sitePinLayerRef.current = sitePinLayer;
 
     const analysisLayer = new GraphicsLayer({
       title: "Temporary spatial analysis",
@@ -648,6 +671,18 @@ export function KilimaniMap({
         ) {
           return;
         }
+        if (onMapClickRef.current && event.mapPoint) {
+          const location = webMercatorUtils.webMercatorToGeographic(
+            event.mapPoint,
+          ) as Point;
+          if (
+            Number.isFinite(location.latitude) &&
+            Number.isFinite(location.longitude)
+          ) {
+            onMapClickRef.current(location.latitude, location.longitude);
+          }
+        }
+        if (pinOnly) return;
         const sequence = ++clickSequence;
         const response = await view
           .hitTest(event, {
@@ -880,12 +915,13 @@ export function KilimaniMap({
       setPlannerToolsControl(null);
       featureLayersRef.current = {};
       proximityLayerRef.current = null;
+      sitePinLayerRef.current = null;
       analysisLayerRef.current = null;
       sketchLayerRef.current = null;
       casesLayerRef.current = null;
       detectionsLayerRef.current = null;
     };
-  }, [enablePlannerTools, mapLayers, showAttributionFooter]);
+  }, [enablePlannerTools, mapLayers, pinOnly, showAttributionFooter]);
 
   useEffect(() => {
     if (clearSelectionToken === 0) return;
@@ -900,6 +936,14 @@ export function KilimaniMap({
     setConstraintChecks(null);
     onFeatureSelectRef.current?.(null);
   }, [clearSelectionToken]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !sitePin) return;
+    view
+      .goTo({ center: [sitePin.lon, sitePin.lat], zoom: 17 })
+      .catch(() => undefined);
+  }, [sitePin?.lat, sitePin?.lon]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -1026,6 +1070,95 @@ export function KilimaniMap({
       }
     });
   }, [layerVisibility, mapLayers]);
+
+  useEffect(() => {
+    const layer = sitePinLayerRef.current;
+    if (!layer) return;
+    layer.removeAll();
+    onSiteProximityChangeRef.current?.(null);
+    if (!sitePin) return;
+
+    const point = new Point({
+      longitude: sitePin.lon,
+      latitude: sitePin.lat,
+    });
+    let cancelled = false;
+    if (showSiteProximity) {
+      void (async () => {
+        try {
+          if (!geodesicBufferOperator.isLoaded()) {
+            await geodesicBufferOperator.load();
+          }
+          if (cancelled || sitePinLayerRef.current !== layer) return;
+          const geometries = geodesicBufferOperator.executeMany(
+            [point, point],
+            [30, 50],
+          );
+          geometries.forEach((geometry, index) => {
+            layer.add(
+              new Graphic({
+                geometry,
+                symbol: new SimpleFillSymbol({
+                  color:
+                    index === 0
+                      ? "rgba(45, 80, 22, 0.12)"
+                      : "rgba(196, 120, 90, 0.08)",
+                  outline: new SimpleLineSymbol({
+                    color: index === 0 ? "#2D5016" : "#C4785A",
+                    width: index === 0 ? 2 : 1.5,
+                    style: index === 0 ? "dash" : "dot",
+                  }),
+                }),
+              }),
+            );
+          });
+        } catch {
+          // Keep the selected pin usable if optional proximity guides fail.
+        }
+      })();
+    }
+    layer.add(
+      new Graphic({
+        geometry: point,
+        symbol: new SimpleMarkerSymbol({
+          color: [196, 120, 90, 0.2],
+          size: 30,
+          outline: { color: "#C4785A", width: 2 },
+        }),
+      }),
+    );
+    layer.add(
+      new Graphic({
+        geometry: point,
+        symbol: new SimpleMarkerSymbol({
+          color: "#C4785A",
+          size: 14,
+          outline: { color: "#2D5016", width: 2 },
+        }),
+      }),
+    );
+
+    const roads = featureLayersRef.current.roads;
+    if (showSiteProximity && sitePinPlaced && roads) {
+      analyzeSiteProximity(
+        sitePin.lat,
+        sitePin.lon,
+        roads,
+        featureLayersRef.current["sewer-areas"],
+        featureLayersRef.current["power-lines"],
+      )
+        .then((result) => {
+          if (!cancelled) onSiteProximityChangeRef.current?.(result);
+        })
+        .catch(() => {
+          if (!cancelled) onSiteProximityChangeRef.current?.(null);
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sitePin?.lat, sitePin?.lon, showSiteProximity, sitePinPlaced]);
 
   useEffect(() => {
     if (

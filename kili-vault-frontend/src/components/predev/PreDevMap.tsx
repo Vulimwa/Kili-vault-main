@@ -1,29 +1,25 @@
-import { useEffect, useRef, useState } from 'react';
-import Map from '@arcgis/core/Map';
-import MapView from '@arcgis/core/views/MapView';
-import GraphicsLayer from '@arcgis/core/layers/GraphicsLayer';
-import Graphic from '@arcgis/core/Graphic';
-import Point from '@arcgis/core/geometry/Point';
-import SimpleMarkerSymbol from '@arcgis/core/symbols/SimpleMarkerSymbol';
-import SimpleFillSymbol from '@arcgis/core/symbols/SimpleFillSymbol';
-import SimpleLineSymbol from '@arcgis/core/symbols/SimpleLineSymbol';
-import * as geometryEngine from '@arcgis/core/geometry/geometryEngine';
-import * as webMercatorUtils from '@arcgis/core/geometry/support/webMercatorUtils';
-import type FeatureLayer from '@arcgis/core/layers/FeatureLayer';
+import { lazy, Suspense, useRef, useState } from 'react';
 import {
-  KILIMANI_WARD_EXTENT,
   MAP_LAYERS,
   SITE_INFRA_LAYER_IDS,
   type SiteInfraLayerId,
 } from '@/config/mapLayers';
-import { createMapFeatureLayer } from '@/lib/mapFeatureLayer';
-import {
-  analyzeSiteProximity,
-  formatRoadProximity,
-  type SiteProximity,
-} from '@/lib/siteProximity';
+import { formatRoadProximity, type SiteProximity } from '@/lib/siteProximity';
 import { MapSkeleton } from '@/components/ui/Skeleton';
 import { cn } from '@/lib/cn';
+
+const KilimaniMap = lazy(() =>
+  import('@/components/map/KilimaniMap').then((module) => ({
+    default: module.KilimaniMap,
+  })),
+);
+
+const PREDEV_MAP_LAYERS = MAP_LAYERS.filter(
+  (layer) =>
+    SITE_INFRA_LAYER_IDS.includes(layer.id as SiteInfraLayerId) &&
+    layer.id !== 'power-lines',
+);
+const NO_CASES: never[] = [];
 
 interface PreDevMapProps {
   lat: number | null;
@@ -37,23 +33,12 @@ const DEFAULT_LAYER_VISIBILITY: Record<SiteInfraLayerId, boolean> = {
   buildings: true,
   roads: true,
   'sewer-areas': true,
-  // The utility service remains queryable for proximity checks but is not
-  // rendered until requested, avoiding a large line dataset blocking startup.
+  // Keep the utility service off the startup path; proximity behavior is
+  // preserved for the layers already used by this check.
   'power-lines': false,
   rivers: false,
   'river-buffer': false,
 };
-
-function proximityRingSymbol(meters: number, fill: string, outline: string) {
-  return new SimpleFillSymbol({
-    color: fill,
-    outline: new SimpleLineSymbol({
-      color: outline,
-      width: meters <= 30 ? 2 : 1.5,
-      style: meters <= 30 ? 'dash' : 'dot',
-    }),
-  });
-}
 
 export function PreDevMap({
   lat,
@@ -62,191 +47,12 @@ export function PreDevMap({
   showProximity = true,
   className,
 }: PreDevMapProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const viewRef = useRef<MapView | null>(null);
-  const overlayLayerRef = useRef<GraphicsLayer | null>(null);
-  const featureLayersRef = useRef<Partial<Record<SiteInfraLayerId, FeatureLayer>>>({});
-  const [ready, setReady] = useState(false);
-  const [mapError, setMapError] = useState<string | null>(null);
   const [pinPlaced, setPinPlaced] = useState(false);
   const [layerVisibility, setLayerVisibility] =
-    useState<Record<SiteInfraLayerId, boolean>>(DEFAULT_LAYER_VISIBILITY);
+    useState<Record<string, boolean>>(DEFAULT_LAYER_VISIBILITY);
   const [proximity, setProximity] = useState<SiteProximity | null>(null);
-
   const onPinDropRef = useRef(onPinDrop);
   onPinDropRef.current = onPinDrop;
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-
-    let destroyed = false;
-    const overlayLayer = new GraphicsLayer({ title: 'Site pin & proximity' });
-    overlayLayerRef.current = overlayLayer;
-
-    const map = new Map({ basemap: 'topo' });
-
-    const featureLayers: Partial<Record<SiteInfraLayerId, FeatureLayer>> = {};
-    MAP_LAYERS.filter((config) =>
-      SITE_INFRA_LAYER_IDS.includes(config.id as SiteInfraLayerId),
-    ).forEach((config) => {
-      const id = config.id as SiteInfraLayerId;
-      if (id === "power-lines") return;
-      const outFields = ["OBJECTID", ...(id === "roads" ? ["fclass"] : [])];
-      const layer = createMapFeatureLayer(
-        config,
-        false,
-        outFields,
-      );
-      featureLayers[id] = layer;
-      map.add(layer);
-    });
-    featureLayersRef.current = featureLayers;
-    map.add(overlayLayer);
-
-    const view = new MapView({
-      container: containerRef.current,
-      map,
-      extent: KILIMANI_WARD_EXTENT,
-      padding: { top: 48, right: 16, bottom: 72, left: 16 },
-    });
-
-    viewRef.current = view;
-    // The plot form must remain usable even when a basemap or FeatureServer
-    // is slow or unavailable. ArcGIS will continue loading layers in place.
-    setReady(true);
-
-    const loadingTimeout = window.setTimeout(() => {
-      if (destroyed) return;
-      setMapError('The planning map is taking too long to load. You can still continue with your selected location.');
-    }, 15000);
-
-    view.when().then(() => {
-      if (!destroyed) {
-        window.clearTimeout(loadingTimeout);
-        setMapError(null);
-      }
-    }).catch((reason: unknown) => {
-      if (destroyed) return;
-      window.clearTimeout(loadingTimeout);
-      setMapError(
-        reason instanceof Error
-          ? reason.message
-          : 'The planning map could not be initialized.',
-      );
-    });
-
-    const handle = view.on('click', (event: __esri.ViewClickEvent) => {
-      const geo = webMercatorUtils.webMercatorToGeographic(event.mapPoint) as Point;
-      if (geo.latitude == null || geo.longitude == null) return;
-      setPinPlaced(true);
-      onPinDropRef.current(geo.latitude, geo.longitude);
-    });
-
-    return () => {
-      destroyed = true;
-      window.clearTimeout(loadingTimeout);
-      handle.remove();
-      view.destroy();
-      viewRef.current = null;
-      overlayLayerRef.current = null;
-      featureLayersRef.current = {};
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!ready) return;
-    SITE_INFRA_LAYER_IDS.forEach((id) => {
-      const layer = featureLayersRef.current[id];
-      if (layer) layer.visible = layerVisibility[id];
-    });
-  }, [layerVisibility, ready]);
-
-  useEffect(() => {
-    const view = viewRef.current;
-    if (!view || lat == null || lon == null) return;
-
-    view
-      .goTo({
-        center: [lon, lat],
-        zoom: 17,
-      })
-      .catch(() => undefined);
-  }, [lat, lon]);
-
-  useEffect(() => {
-    const overlay = overlayLayerRef.current;
-    if (!overlay) return;
-
-    overlay.removeAll();
-    if (lat == null || lon == null) {
-      setProximity(null);
-      return;
-    }
-
-    const point = new Point({ longitude: lon, latitude: lat });
-    if (showProximity) {
-      const buffers = geometryEngine.geodesicBuffer(point, [30, 50], 'meters');
-      const ringGeometries = Array.isArray(buffers) ? buffers : [buffers];
-      ringGeometries.forEach((geometry, index) => {
-        overlay.add(
-          new Graphic({
-            geometry,
-            symbol: proximityRingSymbol(
-              index === 0 ? 30 : 50,
-              index === 0 ? 'rgba(45, 80, 22, 0.12)' : 'rgba(196, 120, 90, 0.08)',
-              index === 0 ? 'rgba(45, 80, 22, 0.85)' : 'rgba(196, 120, 90, 0.75)',
-            ) as __esri.SymbolUnion,
-          }),
-        );
-      });
-    }
-
-    overlay.add(
-      new Graphic({
-        geometry: point,
-        symbol: new SimpleMarkerSymbol({
-          color: [196, 120, 90, 0.2],
-          size: 30,
-          outline: { color: '#C4785A', width: 2 },
-        }),
-      }),
-    );
-    overlay.add(
-      new Graphic({
-        geometry: point,
-        symbol: new SimpleMarkerSymbol({
-          color: '#C4785A',
-          size: 14,
-          outline: { color: '#2D5016', width: 2 },
-        }),
-      }),
-    );
-
-    const roads = featureLayersRef.current.roads;
-    const sewer = featureLayersRef.current['sewer-areas'];
-    const power = featureLayersRef.current['power-lines'];
-    if (!pinPlaced || !showProximity || !roads) {
-      setProximity(null);
-      return;
-    }
-
-    let cancelled = false;
-    setProximity(null);
-    const queryDelay = window.setTimeout(() => {
-      void analyzeSiteProximity(lat, lon, roads, sewer, power)
-        .then((result) => {
-          if (!cancelled) setProximity(result);
-        })
-        .catch(() => {
-          if (!cancelled) setProximity(null);
-        });
-    }, 300);
-
-    return () => {
-      cancelled = true;
-      window.clearTimeout(queryDelay);
-    };
-  }, [lat, lon, pinPlaced, showProximity]);
 
   const layerControls = (
     <div className="pointer-events-auto absolute right-3 top-14 z-20 w-60 max-w-[90%] border border-sand bg-[var(--calcite-color-background)] shadow-soft">
@@ -290,20 +96,32 @@ export function PreDevMap({
         className ?? 'min-h-[280px]',
       )}
     >
-      <div ref={containerRef} className="absolute inset-0 h-full w-full min-h-[inherit]" />
-      {!ready && (
-        <div className="absolute inset-0 z-10">
-          <MapSkeleton />
-        </div>
-      )}
-      {mapError && (
-        <div className="pointer-events-none absolute inset-x-3 top-24 z-30 sm:max-w-md">
-          <calcite-notice open kind="warning" scale="s">
-            <span slot="title">Map unavailable</span>
-            {mapError}
-          </calcite-notice>
-        </div>
-      )}
+      <Suspense
+        fallback={
+          <div className="absolute inset-0 z-10">
+            <MapSkeleton />
+          </div>
+        }
+      >
+        <KilimaniMap
+          cases={NO_CASES}
+          layerVisibility={layerVisibility}
+          mapLayers={PREDEV_MAP_LAYERS}
+          showCases={false}
+          showDetections={false}
+          showAttributionFooter
+          sitePin={lat != null && lon != null ? { lat, lon } : null}
+          showSiteProximity={showProximity}
+          sitePinPlaced={pinPlaced}
+          onSiteProximityChange={setProximity}
+          onMapClick={(nextLat, nextLon) => {
+            setPinPlaced(true);
+            onPinDropRef.current(nextLat, nextLon);
+          }}
+          pinOnly
+          className="h-full w-full min-h-0 rounded-none border-0"
+        />
+      </Suspense>
 
       <div className="pointer-events-none absolute inset-x-3 top-3 z-20">
         <div className="flex flex-wrap items-start justify-between gap-2">
