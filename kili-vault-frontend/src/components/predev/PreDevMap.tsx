@@ -111,23 +111,23 @@ export function PreDevMap({
     });
 
     viewRef.current = view;
+    // The plot form must remain usable even when a basemap or FeatureServer
+    // is slow or unavailable. ArcGIS will continue loading layers in place.
+    setReady(true);
 
     const loadingTimeout = window.setTimeout(() => {
       if (destroyed) return;
-      setReady(true);
       setMapError('The planning map is taking too long to load. You can still continue with your selected location.');
     }, 15000);
 
     view.when().then(() => {
       if (!destroyed) {
         window.clearTimeout(loadingTimeout);
-        setReady(true);
         setMapError(null);
       }
     }).catch((reason: unknown) => {
       if (destroyed) return;
       window.clearTimeout(loadingTimeout);
-      setReady(true);
       setMapError(
         reason instanceof Error
           ? reason.message
