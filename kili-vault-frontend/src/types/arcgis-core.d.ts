@@ -90,6 +90,15 @@ declare module "@arcgis/core/geometry/geometryEngine" {
   export = geometryEngine;
 }
 
+declare module "@arcgis/core/geometry/operators/geodesicBufferOperator" {
+  export function isLoaded(): boolean;
+  export function load(): Promise<void>;
+  export function executeMany(
+    geometries: __esri.Geometry[],
+    distances: number[],
+  ): __esri.Geometry[];
+}
+
 declare module "@arcgis/core/views/SceneView" {
   class SceneView {
     [key: string]: any;

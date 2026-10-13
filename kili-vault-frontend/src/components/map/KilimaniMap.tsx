@@ -1090,11 +1090,15 @@ export function KilimaniMap({
             await geodesicBufferOperator.load();
           }
           if (cancelled || sitePinLayerRef.current !== layer) return;
+          // The local ArcGIS Point declaration is looser than the geometry
+          // structure expected by the SDK operator. The value is still the
+          // SDK Point instance at runtime.
+          const siteGeometry = point as unknown as __esri.Geometry;
           const geometries = geodesicBufferOperator.executeMany(
-            [point, point],
+            [siteGeometry, siteGeometry],
             [30, 50],
           );
-          geometries.forEach((geometry, index) => {
+          geometries.forEach((geometry: __esri.Geometry, index: number) => {
             layer.add(
               new Graphic({
                 geometry,
